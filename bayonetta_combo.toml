@@ -1,0 +1,3 @@
+hud_width_px = 200.0
+trophy_thresholds = [25, 60, 110, 170, 250]
+multiplier_step_points = 25

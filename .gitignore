@@ -1,0 +1,15 @@
+/target/
+*.log
+*.nro
+*.exe
+*.pdb
+rustc-ice-*.txt
+
+*.bak
+*.log
+*.pdb
+*.exe
+*.eff
+*.nus3audio
+*.nus3bank
+*.nutexb
