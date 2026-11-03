@@ -84,6 +84,8 @@ pub unsafe fn update(b:*mut BattleObjectModuleAccessor,slot:usize,chain:Chain,re
         };
         EffectModule::set_pos(b,id,&pos as *const _ as *const Vector3f);EffectModule::set_scale(b,id,&Vector3f{x:p.scale_x*scale*reward_scale[0],y:p.scale_y*scale*reward_scale[1],z:1.0});
         EffectModule::set_rgb(b,id,color[0],color[1],color[2]);EffectModule::set_alpha(b,id,alpha);
+        // Hidden prewarmed panels must not cover the score or the next chain.
+        EffectModule::set_visible(b,id,alpha>0.001&&(reward||!v.payout.hides_chart()));
     }
     v.pool.advance();v.payout.advance(StopModule::is_stop(b));v.header_age=v.header_age.saturating_add(1);
 }
@@ -110,7 +112,7 @@ pub unsafe fn prepare(b:*mut BattleObjectModuleAccessor,slot:usize){
         if request.header{EffectModule::set_disable_render_offset_last(b);EffectModule::enable_sync_init_pos_last(b);}
         EffectModule::set_billboard(b,id,true);
         // Keep a prewarmed component invisible until the HUD applies its style.
-        EffectModule::set_alpha(b,id,0.0);
+        EffectModule::set_alpha(b,id,0.0);EffectModule::set_visible(b,id,false);
         if request.name=="sys_bayo_panel"{diagnostics::trace(&format!("fighter-owned chart panel created handle={} costume={}",id,WorkModule::get_int(b,*FIGHTER_INSTANCE_WORK_ID_INT_COLOR)));}
         v.handles.push(Handle{id,name:request.name});
     }

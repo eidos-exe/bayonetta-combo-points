@@ -12,6 +12,7 @@ impl Payout{
   if chain.active(){self.points=chain.points;self.multiplier=chain.multiplier_tenths();self.age=None;self.seen=chain.settlement_id;return;}
   if self.seen!=chain.settlement_id{self.seen=chain.settlement_id;self.score=chain.last_settlement;self.medal=rank(self.score,thresholds);self.age=if self.score>0{Some(0)}else{None};}
  }
+ pub fn hides_chart(&self)->bool{matches!(self.age,Some(age)if age>=5)}
  pub fn header_alpha(&self)->f32{self.age.filter(|&a|a<5).map(|a|1.0-0.2*a as f32).unwrap_or(0.0)}
  pub fn reward_alpha(&self)->f32{match self.age{Some(a)if a>=5=>((a-5)as f32*0.2).min(1.0),_=>0.0}}
  pub fn glyph_scale(&self)->[f32;2]{[self.reward_alpha()*1.3,1.3]}
@@ -31,3 +32,15 @@ impl Payout{
 }
 
 #[cfg(test)]mod tuned_reward_tests{#[test]fn agreed_pure_platinum_example(){let mut c=crate::score::Chain::new();c.hit(crate::score::Category::Punch,false,false);c.points=157;while c.active(){c.tick(false);}assert_eq!(c.last_settlement,251);assert_eq!(super::rank(c.last_settlement,super::DEFAULT_THRESHOLDS),5);}}
+
+#[cfg(test)]mod visibility_tests{
+ use super::*;use crate::score::Category;
+ #[test]fn payout_takes_over_after_header_fade_and_releases_on_next_chain(){
+  let mut c=Chain::new();let mut p=Payout::new();c.hit(Category::Punch,false,false);p.observe(&c,DEFAULT_THRESHOLDS);assert!(!p.hides_chart());
+  while c.active(){c.tick(false);}p.observe(&c,DEFAULT_THRESHOLDS);
+  for age in 0..5{assert_eq!(p.age,Some(age));assert!(!p.hides_chart());p.advance(false);}
+  assert!(p.hides_chart());assert_eq!(p.header_alpha(),0.0);
+  for _ in 0..5{p.advance(false);}assert_eq!(p.reward_alpha(),1.0);assert!(p.hides_chart());
+  c.hit(Category::Kick,false,false);p.observe(&c,DEFAULT_THRESHOLDS);assert!(!p.hides_chart());assert_eq!(p.reward_alpha(),0.0);
+ }
+}
