@@ -3,7 +3,7 @@ use smash::{app::{self,lua_bind::*,sv_battle_object,utility,BattleObjectModuleAc
 use smashline::{Agent,Main};
 use skyline::hooks::{getRegionAddress,Region};
 use std::{sync::Mutex,convert::TryInto};
-mod score;mod classify;mod hud;mod native_vector;mod events;mod diagnostics;mod hud_layout;mod hit_event;mod capture;mod hud_animation;mod hud_camera;mod hud_owner;mod trophy;mod controller_map;
+mod hit_owner;mod score;mod classify;mod hud;mod native_vector;mod events;mod diagnostics;mod hud_layout;mod hit_event;mod capture;mod hud_animation;mod hud_camera;mod hud_owner;mod trophy;mod controller_map;
 #[allow(dead_code)]mod native_hud_tracks;
 use events::Contact;
 use score::{Category,Chain};
@@ -76,29 +76,56 @@ unsafe fn fighter(slot:usize)->Option<*mut BattleObjectModuleAccessor>{
     let id=app::Fighter::get_id_from_entry_id(slot as i32);if !sv_battle_object::is_active(id){return None;}
     let b=sv_battle_object::module_accessor(id);if entry(b)==Some(slot){Some(b)}else{None}
 }
+unsafe fn resolve_owner(id:u32)->Option<hit_owner::Owner>{
+    hit_owner::fighter_owner(id,|current|{
+        if current==u32::MAX||current==*BATTLE_OBJECT_ID_INVALID as u32||!sv_battle_object::is_active(current){return None;}
+        let b=sv_battle_object::module_accessor(current);if b.is_null(){return None;}
+        match utility::get_category(&mut*b){
+            c if c==*BATTLE_OBJECT_CATEGORY_FIGHTER=>Some(hit_owner::Source::Fighter),
+            c if c==*BATTLE_OBJECT_CATEGORY_WEAPON=>Some(hit_owner::Source::OwnedBy{owner:WorkModule::get_int(b,*WEAPON_INSTANCE_WORK_ID_INT_LINK_OWNER)as u32,item:false}),
+            c if c==*BATTLE_OBJECT_CATEGORY_ITEM=>{
+                let owner=if LinkModule::is_link(b,*ITEM_LINK_NO_HAVE){LinkModule::get_parent_id(b,*ITEM_LINK_NO_HAVE,true)}else{TeamModule::team_owner_id(b)};
+                if owner>u32::MAX as u64{return None;}
+                Some(hit_owner::Source::OwnedBy{owner:owner as u32,item:true})
+            },
+            _=>None,
+        }
+    })
+}
 unsafe fn source(id:u32)->Option<(*mut BattleObjectModuleAccessor,*mut BattleObjectModuleAccessor)>{
-    if !sv_battle_object::is_active(id){return None;}
-    let b=sv_battle_object::module_accessor(id);if b.is_null(){return None;}
-    let owner=if entry(b).is_some(){b}else{
-        if utility::get_category(&mut*b)!=*BATTLE_OBJECT_CATEGORY_WEAPON{return None;}
-        let id=WorkModule::get_int(b,*WEAPON_INSTANCE_WORK_ID_INT_LINK_OWNER) as u32;
-        if !sv_battle_object::is_active(id){return None;}sv_battle_object::module_accessor(id)
-    };
+    let resolved=resolve_owner(id)?;
+    let owner=sv_battle_object::module_accessor(resolved.fighter);
     if owner.is_null()||entry(owner).is_none()||utility::get_kind(&mut*owner)!=*FIGHTER_KIND_BAYONETTA{return None;}
-    Some((owner,b))
+    Some((owner,sv_battle_object::module_accessor(id)))
+}
+unsafe fn item_gunfire(b:*mut BattleObjectModuleAccessor)->bool{
+    if utility::get_category(&mut*b)==*BATTLE_OBJECT_CATEGORY_ITEM&&[
+        *ITEM_KIND_RAYGUNSHOT,*ITEM_KIND_SUPERSCOPESHOT,*ITEM_KIND_BANANAGUNSHOT,
+        *ITEM_KIND_FIREFLOWERSHOT,*ITEM_KIND_DRILLSHOT,*ITEM_KIND_CLUBSHOT,
+    ].contains(&utility::get_kind(&mut*b)){return true;}
+    for id in 0..10{if AttackModule::is_attack(b,id,false){let data=AttackModule::attack_data(b,id,false);if !data.is_null()&&(*data).attr==Hash40::new("collision_attr_normal_bullet").hash{return true;}}}
+    false
 }
 unsafe fn category(owner:*mut BattleObjectModuleAccessor,b:*mut BattleObjectModuleAccessor,damage:f32)->Option<Category>{
-    if owner!=b{return match utility::get_kind(&mut*b){
-        k if k==*WEAPON_KIND_BAYONETTA_SPECIALN_BULLET=>Some(Category::Handgun),
-        k if k==*WEAPON_KIND_BAYONETTA_WICKEDWEAVEARM=>Some(Category::Punch),
-        k if k==*WEAPON_KIND_BAYONETTA_WICKEDWEAVELEG=>Some(Category::Kick),_=>None};}
+    if owner!=b{
+        let source_category=utility::get_category(&mut*b);
+        if source_category==*BATTLE_OBJECT_CATEGORY_WEAPON{
+            match utility::get_kind(&mut*b){
+                k if k==*WEAPON_KIND_BAYONETTA_SPECIALN_BULLET=>return Some(Category::Handgun),
+                k if k==*WEAPON_KIND_BAYONETTA_WICKEDWEAVEARM=>return Some(Category::Punch),
+                k if k==*WEAPON_KIND_BAYONETTA_WICKEDWEAVELEG=>return Some(Category::Kick),
+                _=>if !resolve_owner((*b).battle_object_id).map(|o|o.via_item).unwrap_or(false){return None;},
+            }
+        }else if source_category!=*BATTLE_OBJECT_CATEGORY_ITEM{return None;}
+        return Some(if item_gunfire(b){Category::Handgun}else{Category::Punch});
+    }
     let motion=MotionModule::motion_kind(b);
     let name=classify::MOTIONS.iter().find(|m|Hash40::new(m).hash==motion).copied().unwrap_or("");
     let mut physical=false;let mut bullet=false;let mut physical_power=f32::INFINITY;let mut bullet_power=f32::INFINITY;
     for id in 0..10 {if AttackModule::is_attack(b,id,false){let data=AttackModule::attack_data(b,id,false);if !data.is_null(){
         if (*data).attr==Hash40::new("collision_attr_normal_bullet").hash {bullet=true;bullet_power=bullet_power.min((*data).power);}else{physical=true;physical_power=physical_power.min((*data).power);}
     }}}
-    let movement=classify::physical(name,MotionModule::frame(b));
+    let movement=classify::physical(name,MotionModule::frame(b)).or_else(||if ItemModule::is_have_item(b,0){Some(Category::Punch)}else{None});
     if physical&&bullet {classify::mixed_contact(damage,physical_power,bullet_power,movement)}else{classify::family(physical,bullet,movement)}
 }
 unsafe fn credit(c:Contact,weave:bool,witch_time:bool){
@@ -120,7 +147,7 @@ unsafe fn collision(manager:u64,attacker:u32,defender:u32,damage_register:f32,mo
         diagnostics::trace(&format!("native hit slot={} victim={} motion={:x} damage={:.3} category={:?} shield={}",slot,victim,MotionModule::motion_kind(owner),damage_register,cat,shielding));
         if !hit_event::qualifies(damage_register,shielding,invincible){return None;}
         cat.map(|c|{
-            let weave=owner!=hit_source&&[*WEAPON_KIND_BAYONETTA_WICKEDWEAVEARM,*WEAPON_KIND_BAYONETTA_WICKEDWEAVELEG].contains(&utility::get_kind(&mut*hit_source));
+            let weave=owner!=hit_source&&utility::get_category(&mut*hit_source)==*BATTLE_OBJECT_CATEGORY_WEAPON&&[*WEAPON_KIND_BAYONETTA_WICKEDWEAVEARM,*WEAPON_KIND_BAYONETTA_WICKEDWEAVELEG].contains(&utility::get_kind(&mut*hit_source));
             let witch=WorkModule::is_flag(owner,*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_FLAG_WITCH_TIME);
             (Contact::new(slot,(*owner).battle_object_id,c),weave,witch)
         })
@@ -136,7 +163,7 @@ unsafe extern "C" fn frame(agent:&mut L2CFighterCommon){
     if utility::get_kind(&mut*b)!=*FIGHTER_KIND_BAYONETTA{hud::clear(b,slot);CHAINS.lock().unwrap()[slot].clear();return;}
     if !CALLBACK_SEEN.swap(true,std::sync::atomic::Ordering::Relaxed){diagnostics::trace(&format!("Bayonetta frame callback active slot={} ready={}",slot,!reset));}
     let step=SETTINGS.lock().unwrap().multiplier_step_points;let mut chains=CHAINS.lock().unwrap();let c=&mut chains[slot];c.configure_multiplier(step);
-    if reset{c.clear();}else{c.tick_witch_time(StopModule::is_stop(b),WorkModule::is_flag(b,*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_FLAG_WITCH_TIME));}
+    if reset{c.clear();}else{c.tick_defense(StopModule::is_stop(b),WorkModule::is_flag(b,*FIGHTER_BAYONETTA_INSTANCE_WORK_ID_FLAG_WITCH_TIME),[*FIGHTER_BAYONETTA_STATUS_KIND_BATWITHIN,*FIGHTER_BAYONETTA_STATUS_KIND_SPECIAL_LW_BATWITHIN].contains(&status));}
     drop(chains);
     if !reset{hud::prepare(b,slot);}
 

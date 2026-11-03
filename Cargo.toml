@@ -1,6 +1,6 @@
 [package]
 name = "bayonetta_combo_points"
-version = "0.4.3"
+version = "0.4.4"
 authors = ["eidos.exe", "Mickemoose (original Joker Damage VFX)", "LilyLambda (original combo system)"]
 edition = "2018"
 

@@ -16,20 +16,20 @@ pub const GROUP_REFRESH_TICKS:u32=60;
 pub struct Row {pub category:Category,pub points:u32,pub count:u32,pub remaining:u32,pub witch_time:bool,pub id:u32,pub pulse:u32}
 #[derive(Clone,Copy)]
 pub struct Chain {
-    pub points:u32,pub remaining:u32,pub rows:[Option<Row>;3],normal_count:u32,multiplier_step:u32,witch_held:bool,
+    pub points:u32,pub remaining:u32,pub rows:[Option<Row>;3],normal_count:u32,multiplier_step:u32,defense_held:bool,
     pub revision:u32,pub last_settlement:u64,pub total_settled:u64,pub settlement_id:u32,
 }
 impl Chain {
-    pub const fn new()->Self {Self{points:0,remaining:0,rows:[None;3],normal_count:0,multiplier_step:DEFAULT_MULTIPLIER_STEP,witch_held:false,revision:0,last_settlement:0,total_settled:0,settlement_id:0}}
+    pub const fn new()->Self {Self{points:0,remaining:0,rows:[None;3],normal_count:0,multiplier_step:DEFAULT_MULTIPLIER_STEP,defense_held:false,revision:0,last_settlement:0,total_settled:0,settlement_id:0}}
     pub fn active(&self)->bool {self.rows.iter().any(Option::is_some)}
     pub fn clear(&mut self){let rev=self.revision.wrapping_add(1);let last=self.last_settlement;let total=self.total_settled;let settlement=self.settlement_id;let step=self.multiplier_step;*self=Self::new();self.multiplier_step=step;self.revision=rev;self.last_settlement=last;self.total_settled=total;self.settlement_id=settlement;}
     fn settle(&mut self){self.settlement_id=self.settlement_id.wrapping_add(1);let tenths=self.multiplier_uncapped_tenths();self.last_settlement=(self.points as u64).saturating_mul(tenths)/10;self.total_settled=self.total_settled.saturating_add(self.last_settlement);self.clear();}
     pub fn configure_multiplier(&mut self,step:u32){self.multiplier_step=step.max(1);}
-    pub fn tick_witch_time(&mut self,paused:bool,witch_time:bool){
-        if !self.active(){self.witch_held=false;return;}
-        if witch_time{self.witch_held=true;return;}
+    pub fn tick_defense(&mut self,paused:bool,witch_time:bool,bat_within:bool){
+        if !self.active(){self.defense_held=false;return;}
+        if witch_time||bat_within{self.defense_held=true;return;}
         if paused{return;}
-        if self.witch_held{self.witch_held=false;for row in self.rows.iter_mut().flatten(){row.remaining=NEW_ROW_TICKS;}self.remaining=NEW_ROW_TICKS;return;}
+        if self.defense_held{self.defense_held=false;for row in self.rows.iter_mut().flatten(){row.remaining=NEW_ROW_TICKS;}self.remaining=NEW_ROW_TICKS;return;}
         self.tick(false);
     }
     pub fn tick(&mut self,paused:bool){
@@ -76,8 +76,16 @@ impl Chain {
 #[cfg(test)]mod tuning_tests{
  use super::*;
  #[test]fn agreed_multiplier_steps(){let mut c=Chain::new();for(p,m)in[(0,10),(24,10),(25,11),(49,11),(50,12),(75,13),(100,14),(125,15),(150,16),(175,17)]{c.points=p;assert_eq!(c.multiplier_tenths(),m);}}
- #[test]fn witch_time_preserves_chain_then_restores_window(){let mut c=Chain::new();c.hit(Category::Handgun,false,false);for _ in 0..59{c.tick(false);}for _ in 0..400{c.tick_witch_time(false,true);}assert!(c.active());assert_eq!(c.points,1);assert_eq!(c.remaining,121);c.tick_witch_time(false,false);assert_eq!(c.remaining,180);for _ in 0..179{c.tick_witch_time(false,false);}assert!(c.active());c.tick_witch_time(false,false);assert!(!c.active());}
- #[test]fn witch_time_does_not_revive_settled_chain(){let mut c=Chain::new();c.hit(Category::Punch,false,false);for _ in 0..180{c.tick(false);}let id=c.settlement_id;c.tick_witch_time(false,true);c.tick_witch_time(false,false);assert!(!c.active());assert_eq!(c.settlement_id,id);}
- #[test]fn missed_counter_does_not_extend_chain(){let mut c=Chain::new();c.hit(Category::Punch,false,false);for _ in 0..180{c.tick_witch_time(false,false);}assert!(!c.active());}
+ #[test]fn witch_time_preserves_chain_then_restores_window(){let mut c=Chain::new();c.hit(Category::Handgun,false,false);for _ in 0..59{c.tick(false);}for _ in 0..400{c.tick_defense(false,true,false);}assert!(c.active());assert_eq!(c.points,1);assert_eq!(c.remaining,121);c.tick_defense(false,false,false);assert_eq!(c.remaining,180);for _ in 0..179{c.tick_defense(false,false,false);}assert!(c.active());c.tick_defense(false,false,false);assert!(!c.active());}
+ #[test]fn witch_time_does_not_revive_settled_chain(){let mut c=Chain::new();c.hit(Category::Punch,false,false);for _ in 0..180{c.tick(false);}let id=c.settlement_id;c.tick_defense(false,true,false);c.tick_defense(false,false,false);assert!(!c.active());assert_eq!(c.settlement_id,id);}
+ #[test]fn missed_counter_does_not_extend_chain(){let mut c=Chain::new();c.hit(Category::Punch,false,false);for _ in 0..180{c.tick_defense(false,false,false);}assert!(!c.active());}
  #[test]fn configured_interval_survives_chain_reset(){let mut c=Chain::new();c.configure_multiplier(50);c.clear();c.points=100;assert_eq!(c.multiplier_tenths(),12);}
+}
+
+#[cfg(test)]mod bat_within_tests{
+ use super::*;
+ #[test]fn successful_bats_preserve_points_and_restore_full_window(){let mut c=Chain::new();c.hit(Category::Punch,false,false);for _ in 0..175{c.tick(false);}for _ in 0..300{c.tick_defense(false,false,true);}assert_eq!(c.remaining,5);assert_eq!(c.points,10);c.tick_defense(false,false,false);assert_eq!(c.remaining,NEW_ROW_TICKS);assert_eq!(c.hit(Category::Kick,false,false),10);assert_eq!(c.points,20);}
+ #[test]fn bats_do_not_start_or_revive_a_chain(){let mut c=Chain::new();c.tick_defense(false,false,true);c.tick_defense(false,false,false);assert!(!c.active());c.hit(Category::Punch,false,false);for _ in 0..180{c.tick(false);}let settled=c.settlement_id;c.tick_defense(false,false,true);c.tick_defense(false,false,false);assert!(!c.active());assert_eq!(c.settlement_id,settled);}
+ #[test]fn ordinary_dodge_still_expires(){let mut c=Chain::new();c.hit(Category::Punch,false,false);for _ in 0..180{c.tick_defense(false,false,false);}assert!(!c.active());}
+ #[test]fn overlapping_defenses_restore_only_after_both_end(){let mut c=Chain::new();c.hit(Category::Kick,false,false);c.tick(false);c.tick_defense(false,true,false);c.tick_defense(false,true,true);c.tick_defense(false,false,true);assert_eq!(c.remaining,179);c.tick_defense(false,false,false);assert_eq!(c.remaining,180);c.tick_defense(false,false,false);assert_eq!(c.remaining,179);}
 }
